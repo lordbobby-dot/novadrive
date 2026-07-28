@@ -2,7 +2,7 @@
 # pattern as apps/api/Dockerfile — see that file's comments and docs/deployment.md) plus Next's
 # `output: "standalone"` build mode for a minimal self-contained server bundle.
 
-FROM node:20-slim AS base
+FROM node:26-slim AS base
 RUN corepack enable
 WORKDIR /app
 
@@ -39,7 +39,7 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
 RUN pnpm --filter web build
 
 # ---- Runtime ----
-FROM node:20-slim AS runner
+FROM node:26-slim AS runner
 RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs nextjs
 WORKDIR /app
 
