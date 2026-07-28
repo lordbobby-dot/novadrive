@@ -1,6 +1,6 @@
 "use client";
 
-import { CloudCog } from "lucide-react";
+import { Logo } from "@/components/logo";
 import { useHealthCheck } from "@/hooks/use-health-check";
 
 export function SiteFooter() {
@@ -11,7 +11,7 @@ export function SiteFooter() {
     <footer className="border-t border-border/60">
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-6 py-8 sm:flex-row">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <CloudCog className="size-4" aria-hidden />
+          <Logo className="size-4" />
           <span>&copy; {new Date().getFullYear()} NovaDrive.</span>
         </div>
 

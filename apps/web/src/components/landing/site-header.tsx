@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { CloudCog } from "lucide-react";
 import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { LogoWordmark } from "@/components/logo";
 
 const NAV_LINKS = [
   { href: "#features", label: "Features" },
@@ -15,9 +15,8 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-50 border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
-        <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
-          <CloudCog className="size-5 text-primary" aria-hidden />
-          <span>NovaDrive</span>
+        <Link href="/">
+          <LogoWordmark />
         </Link>
 
         <nav className="hidden items-center gap-8 text-sm text-muted-foreground md:flex">
