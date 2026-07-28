@@ -49,7 +49,7 @@
     "@opentelemetry/sdk-node": "^0.220.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@prisma/client": "^6.2.1",
-    "@prisma/instrumentation": "^6.19.3",
+    "@prisma/instrumentation": "^7.9.1",
     "@sentry/nestjs": "^10.67.0",
     "bullmq": "^5.80.3",
     "clamscan": "^2.4.0",
