@@ -324,31 +324,33 @@ function LinkTab({
 
       <div className="flex flex-col gap-2 rounded-md border border-dashed p-2.5">
         <p className="text-xs font-medium text-muted-foreground">Create a new link</p>
-        <div className="flex flex-col gap-2 sm:flex-row">
+        <div className="flex flex-col gap-2">
           <Input
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Password (optional)"
             type="text"
-            className="flex-1"
+            className="w-full"
           />
-          <select
-            value={expiresIn}
-            onChange={(e) => setExpiresIn(e.target.value as typeof expiresIn)}
-            className="h-8 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-          >
-            <option value="">Never expires</option>
-            <option value="1">Expires in 1 day</option>
-            <option value="7">Expires in 7 days</option>
-            <option value="30">Expires in 30 days</option>
-          </select>
-          <Input
-            value={maxDownloads}
-            onChange={(e) => setMaxDownloads(e.target.value.replace(/\D/g, ""))}
-            placeholder="Max downloads"
-            inputMode="numeric"
-            className="w-32"
-          />
+          <div className="flex gap-2">
+            <select
+              value={expiresIn}
+              onChange={(e) => setExpiresIn(e.target.value as typeof expiresIn)}
+              className="h-8 min-w-0 flex-1 rounded-lg border border-input bg-transparent px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              <option value="">Never expires</option>
+              <option value="1">Expires in 1 day</option>
+              <option value="7">Expires in 7 days</option>
+              <option value="30">Expires in 30 days</option>
+            </select>
+            <Input
+              value={maxDownloads}
+              onChange={(e) => setMaxDownloads(e.target.value.replace(/\D/g, ""))}
+              placeholder="Max downloads"
+              inputMode="numeric"
+              className="w-28 shrink-0 sm:w-32"
+            />
+          </div>
         </div>
         <Button size="sm" className="self-start" onClick={() => void handleCreate()} disabled={createLink.isPending}>
           Create link
