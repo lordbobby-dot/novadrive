@@ -55,7 +55,7 @@ export function UploadProgressPanel() {
   ).length;
 
   return (
-    <div className="fixed right-4 bottom-4 z-40 w-80 rounded-lg border border-border bg-background shadow-lg">
+    <div className="fixed right-4 bottom-4 left-4 z-40 w-auto rounded-lg border border-border bg-background shadow-lg sm:left-auto sm:w-80">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <p className="text-sm font-medium">
           {activeCount > 0 ? `Uploading ${activeCount} item${activeCount === 1 ? "" : "s"}` : "Uploads"}

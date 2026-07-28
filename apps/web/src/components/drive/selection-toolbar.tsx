@@ -19,7 +19,7 @@ export function SelectionToolbar({
   if (count === 0) return null;
 
   return (
-    <div className="fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-lg border border-border bg-popover px-4 py-2 shadow-lg">
+    <div className="fixed bottom-4 left-1/2 z-30 flex w-[calc(100%-2rem)] -translate-x-1/2 items-center justify-between gap-3 overflow-x-auto rounded-lg border border-border bg-popover px-4 py-2 shadow-lg sm:w-auto sm:justify-start">
       <span className="text-sm font-medium">
         {count} item{count === 1 ? "" : "s"} selected
       </span>

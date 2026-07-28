@@ -8,6 +8,11 @@ interface UiState {
   toggleSidebar: () => void;
   viewMode: ViewMode;
   setViewMode: (mode: ViewMode) => void;
+  /** The mobile slide-in nav drawer (sidebar becomes an overlay below the `md` breakpoint) —
+   * deliberately not persisted, it should always start closed on load. */
+  mobileNavOpen: boolean;
+  toggleMobileNav: () => void;
+  closeMobileNav: () => void;
 }
 
 export const useUiStore = create<UiState>()(
@@ -17,7 +22,10 @@ export const useUiStore = create<UiState>()(
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
       viewMode: "grid",
       setViewMode: (mode) => set({ viewMode: mode }),
+      mobileNavOpen: false,
+      toggleMobileNav: () => set((state) => ({ mobileNavOpen: !state.mobileNavOpen })),
+      closeMobileNav: () => set({ mobileNavOpen: false }),
     }),
-    { name: "novadrive-ui" },
+    { name: "novadrive-ui", partialize: (state) => ({ sidebarCollapsed: state.sidebarCollapsed, viewMode: state.viewMode }) },
   ),
 );
