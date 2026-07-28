@@ -3,7 +3,7 @@
 # workspace packages it actually depends on) before installing/building — see docs/deployment.md
 # for the full rationale and how to build/run this image.
 
-FROM node:20-slim AS base
+FROM node:26-slim AS base
 RUN corepack enable
 WORKDIR /app
 
@@ -33,7 +33,7 @@ RUN pnpm prune --prod --no-optional
 RUN pnpm --filter api prisma:generate
 
 # ---- Runtime ----
-FROM node:20-slim AS runner
+FROM node:26-slim AS runner
 # openssl: Prisma's engine binaries need it at runtime, not just at generate time (see the builder
 # stage). procps: provides `pgrep`, used by docker-compose.prod.yml's `worker` service healthcheck
 # — that service has no HTTP endpoint to probe (see apps/api/src/main-worker.ts), so process
