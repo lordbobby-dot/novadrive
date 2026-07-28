@@ -1,0 +1,3 @@
+This is a sample fixture file used by the Playwright E2E suite (Milestone 15) to exercise the
+upload pipeline end to end against a real running API and real S3 bucket. See
+e2e/README.md for how to run this suite and how uploaded files are cleaned up.

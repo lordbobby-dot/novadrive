@@ -1,0 +1,254 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_ENV: test
+  DATABASE_URL: postgresql://novadrive:novadrive@localhost:5432/novadrive?schema=public
+  REDIS_HOST: localhost
+  REDIS_PORT: 6379
+  CLERK_SECRET_KEY: sk_test_ci_placeholder_not_a_real_key
+  CLERK_WEBHOOK_SIGNING_SECRET: whsec_ci_placeholder_not_a_real_secret
+  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_bm92YWRyaXZlLWNpLXBsYWNlaG9sZGVyLmNsZXJrLmFjY291bnRzLmRldiQ=
+  # Real AWS credentials, required — unlike Clerk (mocked at the module level in every e2e spec,
+  # see apps/api/test/uploads.e2e-spec.ts's `jest.mock('@clerk/backend', ...)`), there is no S3
+  # mock anywhere in this codebase, so the upload/download/version e2e specs do a real S3
+  # round-trip against these. See docs/branch-protection.md's secrets table for setup.
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: novadrive
+          POSTGRES_PASSWORD: novadrive
+          POSTGRES_DB: novadrive
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novadrive -d novadrive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      # The upload pipeline's virus-scan step (see docs/security.md) talks to clamd over plain
+      # TCP — without this service, uploads/security e2e specs that exercise the EICAR
+      # quarantine flow would either fail or silently skip real scanning.
+      clamav:
+        image: clamav/clamav:stable
+        ports:
+          - 3310:3310
+        options: >-
+          --health-cmd "clamdcheck.sh"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --health-start-period 5m
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Dependency audit (fails on known high/critical vulnerabilities)
+        run: pnpm audit --audit-level=high
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Prisma generate
+        run: pnpm --filter api prisma:generate
+
+      - name: Migration drift check (schema.prisma vs. committed migrations)
+        run: |
+          PGPASSWORD=novadrive psql -h localhost -U novadrive -d novadrive \
+            -c "CREATE DATABASE novadrive_shadow;"
+
+          DIFF=$(pnpm --filter api exec prisma migrate diff \
+            --from-migrations apps/api/prisma/migrations \
+            --to-schema-datamodel apps/api/prisma/schema.prisma \
+            --shadow-database-url "postgresql://novadrive:novadrive@localhost:5432/novadrive_shadow?schema=public")
+          echo "$DIFF"
+
+          # Prisma's schema DSL can't express `GENERATED ALWAYS AS (...) STORED` (see
+          # docs/search.md) — File.searchVector/Folder.searchVector are declared as plain
+          # `Unsupported("tsvector")` in schema.prisma, with the real generated-column definition
+          # applied only via raw SQL in the migration. `prisma migrate diff` always reports this
+          # one pair of columns as "drift" as a result — confirmed by running it against this
+          # exact, unmodified repo. That's expected and permanent, not a regression; anything
+          # else in the diff is real drift and should fail the build.
+          UNEXPECTED=$(echo "$DIFF" | grep -v -E 'searchVector|Changed the `(File|Folder)` table|Removed index on columns|^[[:space:]]*$')
+          if [ -n "$UNEXPECTED" ]; then
+            echo "Unexpected migration drift (beyond the known searchVector exception):"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+
+      - name: Prisma migrate (CI database)
+        run: pnpm --filter api exec prisma migrate deploy
+
+      - name: Unit tests (with coverage)
+        run: pnpm --filter api test:cov
+
+      - name: Verify AWS secrets are configured
+        run: |
+          missing=()
+          [ -z "$AWS_REGION" ] && missing+=("AWS_REGION")
+          [ -z "$AWS_S3_BUCKET" ] && missing+=("AWS_S3_BUCKET")
+          [ -z "$AWS_ACCESS_KEY_ID" ] && missing+=("AWS_ACCESS_KEY_ID")
+          [ -z "$AWS_SECRET_ACCESS_KEY" ] && missing+=("AWS_SECRET_ACCESS_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing required repository secret(s): ${missing[*]}"
+            echo "The e2e suite does real S3 round-trips (no mock exists) — add these under"
+            echo "Settings > Secrets and variables > Actions. See docs/branch-protection.md."
+            exit 1
+          fi
+
+      - name: API integration/e2e tests
+        run: pnpm --filter api test:e2e
+
+      - name: Build
+        run: pnpm build
+
+      - name: Dump OpenAPI spec
+        run: pnpm --filter api openapi:dump
+
+      - name: SDK/OpenAPI contract check
+        run: pnpm --filter web contract:check
+
+  # Requires real Clerk test-instance secrets (E2E_CLERK_SECRET_KEY, E2E_CLERK_PUBLISHABLE_KEY,
+  # E2E_CLERK_USER_EMAIL, E2E_CLERK_USER_PASSWORD) as repository secrets — the `ci` job above
+  # intentionally uses placeholder Clerk keys, which can't sign anyone in. Skips itself (rather
+  # than failing) when those secrets aren't configured, since setting them up is the user's
+  # action, not something this workflow file can do on its own. See apps/web/e2e/README.md.
+  playwright:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.E2E_CLERK_SECRET_KEY != '' }}
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://novadrive:novadrive@localhost:5432/novadrive?schema=public
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+      CLERK_WEBHOOK_SIGNING_SECRET: whsec_ci_placeholder_not_a_real_secret
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+      E2E_CLERK_USER_EMAIL: ${{ secrets.E2E_CLERK_USER_EMAIL }}
+      E2E_CLERK_USER_PASSWORD: ${{ secrets.E2E_CLERK_USER_PASSWORD }}
+      # Same AWS secrets the `ci` job requires (see that job's env block) — the API process this
+      # job starts (`start:prod` below) handles real file uploads during drive.spec.ts, so it
+      # needs real S3 credentials too, not just a real Clerk instance.
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: novadrive
+          POSTGRES_PASSWORD: novadrive
+          POSTGRES_DB: novadrive
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novadrive -d novadrive"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      clamav:
+        image: clamav/clamav:stable
+        ports:
+          - 3310:3310
+        options: >-
+          --health-cmd "clamdcheck.sh"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+          --health-start-period 5m
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prisma generate + migrate
+        run: |
+          pnpm --filter api prisma:generate
+          pnpm --filter api exec prisma migrate deploy
+
+      - name: Install Playwright browsers
+        run: pnpm --filter web exec playwright install --with-deps chromium
+
+      - name: Build the API
+        run: pnpm --filter api build
+
+      - name: Start the API in the background
+        run: nohup pnpm --filter api start:prod > api.log 2>&1 &
+
+      - name: Wait for the API to be reachable
+        run: npx wait-on http://localhost:4000/health --timeout 60000
+
+      - name: Run Playwright E2E suite
+        run: pnpm --filter web test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7

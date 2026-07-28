@@ -1,0 +1,665 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Identity is owned by Clerk. This row exists only so other tables (Folder, File,
+/// Permission, ...) have a local id to put a foreign key on; it's kept in sync via the
+/// /webhooks/clerk endpoint (user.created / user.updated / user.deleted).
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  email     String   @unique
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// A platform-level role, distinct from any per-resource Permission/OrganizationMember role —
+  /// grants access to /admin/* only. Bootstrapped via ADMIN_BOOTSTRAP_EMAILS (see
+  /// SyncClerkUserUseCase) since there's no self-serve path to become the first admin; every
+  /// admin after that is promoted from within the admin panel itself.
+  isSystemAdmin Boolean @default(false)
+
+  /// Set by an admin (AdminModule), independent of Clerk's own ban state — kept locally too as
+  /// defense in depth so ClerkAuthGuard can reject a request even if a JWT minted just before the
+  /// Clerk ban propagated is still cryptographically valid. See SuspendUserUseCase, which also
+  /// calls Clerk's banUser (immediately revokes that user's live sessions).
+  isSuspended Boolean   @default(false)
+  suspendedAt DateTime?
+
+  folders         Folder[]
+  files           File[]
+  storageObjects  StorageObject[]
+  trashedItems    Trash[]
+  favorites       Favorite[]
+  tags            Tag[]
+  fileVersions    FileVersion[]
+  activities      Activity[]
+  permissionsHeld  Permission[]  @relation("PermissionSubject")
+  permissionsGiven Permission[]  @relation("PermissionGranter")
+  sharedLinks      SharedLink[]
+  invitationsSent  Invitation[]
+  comments         Comment[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+  organizationsOwned      Organization[]       @relation("OrganizationOwner")
+  organizationMemberships OrganizationMember[]
+
+  @@index([email])
+}
+
+/// Nested folders, unlimited depth. `parentId IS NULL` marks a user's root folder — enforced
+/// unique per owner via a partial index (see migration). `path` is a materialized path of
+/// ancestor ids (e.g. "/rootId/childId/") enabling fast subtree queries in later milestones
+/// without a recursive query; `depth` is derived from it for display/sorting.
+model Folder {
+  id       String  @id @default(cuid())
+  name     String
+  ownerId  String
+  parentId String?
+  path     String
+  depth    Int     @default(0)
+
+  /// Both null for a personal-Drive folder. Set together (never one without the other) for a
+  /// folder that lives inside an org workspace — inherited from the parent at creation time by
+  /// CreateFolderUseCase, so an org-scoped subtree is workspace-scoped uniformly without every
+  /// use case needing to walk up to find out. `organizationId` is redundant with
+  /// `workspace.organizationId` but kept denormalized so PermissionResolver's org-role fallback
+  /// doesn't need an extra join. File deliberately does NOT get these same two columns — a
+  /// File's org/workspace scope is always its folder's, and every permission check already
+  /// resolves File access via its containing Folder, so a copy on File would be a driftable
+  /// field with no query that needs it. See docs/organizations.md.
+  organizationId String?
+  workspaceId    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner        User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  parent       Folder?       @relation("FolderChildren", fields: [parentId], references: [id], onDelete: Cascade)
+  children     Folder[]      @relation("FolderChildren")
+  files        File[]
+  trash        Trash?
+  favorites    Favorite[]
+  tags         FolderTag[]
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  /// GENERATED ALWAYS AS to_tsvector('english', name) STORED, with a GIN index — both added by
+  /// hand in the migration since Prisma can't express a generated column. Declared here as
+  /// Unsupported so `prisma migrate dev`'s drift detection knows about it and doesn't try to
+  /// drop it as an untracked column; it's excluded from the generated Client either way (no
+  /// typed query can touch it), which is why the search service reads it via raw SQL.
+  searchVector Unsupported("tsvector")?
+
+  @@index([ownerId, parentId])
+  @@index([path])
+  @@index([workspaceId, parentId])
+}
+
+/// PENDING: StorageObject row created, S3 multipart upload not yet initiated.
+/// UPLOADING: S3 CreateMultipartUpload succeeded, client is PUTting parts directly to S3.
+/// COMPLETED: CompleteMultipartUpload succeeded and the checksum-verification job confirmed
+/// the object's integrity — the linked File is now safe to serve/download.
+/// ABORTED: cancelled by the client; S3's multipart upload was aborted, no orphaned parts.
+/// FAILED: checksum verification failed after upload — the object exists in S3 but is not
+/// trusted and is not linked to a File the user can see.
+enum UploadStatus {
+  PENDING
+  UPLOADING
+  COMPLETED
+  ABORTED
+  FAILED
+  /// Checksum passed but the virus scan found malware. The object is kept in S3 (not deleted —
+  /// forensics/audit trail) but no File row is ever created for it, so it's structurally
+  /// unreachable via any download path.
+  QUARANTINED
+}
+
+/// Binary content never lives here — only the pointer to where it lives in S3, plus the
+/// metadata needed to serve/verify it. Every real upload (Milestone 3+) creates one of these;
+/// Milestone 2's now-removed stub path proved the Folder/File model independently of storage.
+model StorageObject {
+  id               String       @id @default(cuid())
+  ownerId          String
+  bucket           String
+  objectKey        String
+  eTag             String?
+  /// Server-computed and verified checksum (SHA-256), set once the checksum-verification job
+  /// confirms the upload. Not to be confused with clientChecksum below.
+  checksum         String?
+  /// SHA-256 the client declared before uploading — what checksum verification checks against.
+  clientChecksum   String?
+  contentType      String
+  size             BigInt
+  storageClass     String       @default("STANDARD")
+  encryptionStatus String       @default("AES256")
+  version          Int          @default(1)
+  region           String
+
+  uploadStatus UploadStatus @default(PENDING)
+  /// The S3 multipart upload id — present while UPLOADING, kept afterward for audit.
+  uploadId     String?
+  partSize     BigInt?
+  totalParts   Int?
+
+  /// Resolved once, by InitiateUploadUseCase, from the upload's target folder — never
+  /// recomputed later. `size` was already reserved against this exact subject at initiate time
+  /// (see docs/quota.md), so every later quota mutation (release on abort/failure, decrement on
+  /// permanent delete) reads it straight off this row rather than re-deriving it from whatever
+  /// folder the content happens to live in by then, which could have changed. Both null for a
+  /// StorageObject created outside the real upload pipeline (the legacy M2 stub path) — such
+  /// objects never participate in quota accounting at all.
+  quotaSubjectType QuotaSubjectType?
+  quotaSubjectId   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner       User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  file        File?
+  parts       UploadPart[]
+  fileVersion FileVersion?
+
+  @@unique([bucket, objectKey])
+  @@index([ownerId, uploadStatus])
+  @@index([quotaSubjectType, quotaSubjectId])
+  /// Lets the abandoned-upload cleanup job find every PENDING/UPLOADING row older than the
+  /// staleness cutoff in one indexed scan across all owners, instead of a full table scan.
+  @@index([uploadStatus, createdAt])
+}
+
+/// Server-side record of each S3 multipart part the client has successfully uploaded — lets a
+/// resumed upload (even from a different tab/device) skip parts that are already done, and is
+/// what CompleteMultipartUpload's part list is built from (not client-submitted at complete
+/// time, to avoid trusting client-reported ETags for the final call).
+model UploadPart {
+  id              String   @id @default(cuid())
+  storageObjectId String
+  partNumber      Int
+  eTag            String
+  size            BigInt
+  createdAt       DateTime @default(now())
+
+  storageObject StorageObject @relation(fields: [storageObjectId], references: [id], onDelete: Cascade)
+
+  @@unique([storageObjectId, partNumber])
+}
+
+/// A quota subject is either a single User (personal Drive) or an Organization (shared across
+/// every workspace inside it) — never a Workspace individually. Workspaces inside one org draw
+/// from one shared pool, matching "organizations, not workspaces, own a storage budget."
+enum QuotaSubjectType {
+  USER
+  ORGANIZATION
+}
+
+/// One row per subject that has ever attempted an upload — lazily created with the configured
+/// default limit on first reservation attempt (see docs/quota.md), not provisioned eagerly for
+/// every user/org. `usedBytes` is a running total maintained by atomic conditional UPDATEs
+/// (reserve/release), never recomputed by summing StorageObject rows — see
+/// StorageObject.quotaSubjectType for why each object's contribution is fixed at creation time.
+/// `lastNotifiedThreshold` (0/80/95/100) is the ratchet that makes quota-warning notifications
+/// fire at most once per upward threshold crossing — see QuotaService.
+model StorageQuota {
+  id                    String           @id @default(cuid())
+  subjectType           QuotaSubjectType
+  subjectId             String
+  limitBytes            BigInt
+  usedBytes             BigInt           @default(0)
+  lastNotifiedThreshold Int              @default(0)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  @@unique([subjectType, subjectId])
+}
+
+model File {
+  id              String @id @default(cuid())
+  name            String
+  ownerId         String
+  folderId        String
+  storageObjectId String @unique
+
+  /// Set whenever the file's content is actually opened (a download or preview signed URL is
+  /// issued) — see GetDownloadUrlUseCase/GetPreviewUrlUseCase. Null until first access, not
+  /// backfilled to createdAt, so "Recent" (GET /recent) genuinely reflects access history rather
+  /// than upload history — a file nobody has opened since uploading it never appears there.
+  lastAccessedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner         User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folder        Folder        @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  storageObject StorageObject @relation(fields: [storageObjectId], references: [id], onDelete: Cascade)
+  trash         Trash?
+  favorites     Favorite[]
+  tags          FileTag[]
+  versions      FileVersion[]
+
+  /// See Folder.searchVector — same generated tsvector column + GIN index, hand-added in the
+  /// migration, derived from "name".
+  searchVector Unsupported("tsvector")?
+
+  @@index([ownerId, folderId])
+  @@index([ownerId, lastAccessedAt])
+}
+
+/// Existence of a row = the folder or file is trashed. Exactly one of folderId/fileId is set
+/// (enforced by a CHECK constraint added in the migration).
+model Trash {
+  id        String   @id @default(cuid())
+  ownerId   String
+  folderId  String?  @unique
+  fileId    String?  @unique
+  deletedAt DateTime @default(now())
+
+  owner  User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  file   File?   @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+}
+
+/// Same one-of-two-targets shape as Trash, but unlike Trash (a single global fact about a file)
+/// favoriting is per-viewer — two different users with access to the same shared file can each
+/// favorite it independently. So the uniqueness is scoped to (ownerId, folderId/fileId) rather
+/// than Trash's bare-fileId uniqueness.
+model Favorite {
+  id        String   @id @default(cuid())
+  ownerId   String
+  folderId  String?
+  fileId    String?
+  createdAt DateTime @default(now())
+
+  owner  User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folder Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  file   File?   @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, folderId])
+  @@unique([ownerId, fileId])
+  @@index([ownerId])
+}
+
+/// A user-scoped label (unique per owner, not global) — two different users can each have their
+/// own "Invoices" tag without collision, matching every other resource in this schema being
+/// owner-scoped rather than shared.
+model Tag {
+  id        String   @id @default(cuid())
+  ownerId   String
+  name      String
+  createdAt DateTime @default(now())
+
+  owner   User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  files   FileTag[]
+  folders FolderTag[]
+
+  @@unique([ownerId, name])
+}
+
+model FileTag {
+  fileId    String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  file File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([fileId, tagId])
+  @@index([tagId])
+}
+
+model FolderTag {
+  folderId  String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  folder Folder @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([folderId, tagId])
+  @@index([tagId])
+}
+
+/// Immutable history: every content update to a File creates a new row here rather than
+/// mutating an existing one. `File.storageObjectId` is the "current" pointer and is rewritten to
+/// a new version's storageObjectId when a version is added or an old one is restored — it does
+/// not have to be the highest `versionNumber`'s object, since restoring an earlier version moves
+/// the pointer backward without deleting the version that was current before the restore.
+model FileVersion {
+  id              String   @id @default(cuid())
+  fileId          String
+  storageObjectId String   @unique
+  versionNumber   Int
+  createdBy       String
+  changeNote      String?
+  createdAt       DateTime @default(now())
+
+  file          File          @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  storageObject StorageObject @relation(fields: [storageObjectId], references: [id], onDelete: Cascade)
+  creator       User          @relation(fields: [createdBy], references: [id], onDelete: Cascade)
+
+  @@unique([fileId, versionNumber])
+  @@index([fileId])
+}
+
+enum ActivityAction {
+  UPLOAD
+  DOWNLOAD
+  DELETE
+  RESTORE
+  RENAME
+  MOVE
+  COPY
+  SHARE
+  LOGIN
+  LOGOUT
+  PERMISSION_CHANGE
+  VERSION_RESTORE
+  COMMENT
+}
+
+enum ActivityTargetType {
+  FILE
+  FOLDER
+  ACCOUNT
+  ORGANIZATION
+}
+
+/// Append-only — rows are never updated or deleted (aside from cascading if the actor account
+/// itself is deleted). Written exclusively by ActivityModule's event listeners, never directly by
+/// other modules' use cases, so every action's log entry has one consistent shape regardless of
+/// which part of the app triggered it. See docs/versioning-and-activity.md.
+model Activity {
+  id         String             @id @default(cuid())
+  actorId    String
+  action     ActivityAction
+  targetType ActivityTargetType
+  targetId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime           @default(now())
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@index([targetId])
+  @@index([actorId, createdAt])
+}
+
+/// Files and folders share one permission model, so this is polymorphic (resourceType +
+/// resourceId) rather than the nullable-folderId/nullable-fileId pattern Trash/Favorite use —
+/// there's no natural "exactly one of two FKs" shape here since a grant is always on exactly one
+/// resource of a type named by resourceType. Not backed by a DB-level FK (Postgres can't express
+/// a polymorphic foreign key without a trigger); resourceId integrity is enforced in the
+/// application layer, same tradeoff every polymorphic-association schema makes.
+/// ORGANIZATION is only ever used by Invitation (an org-level invite), reusing the same
+/// polymorphic resourceType/resourceId pair every other resource-scoped table already uses
+/// rather than adding a parallel set of organization-only columns. Permission/SharedLink/Comment
+/// never receive it — org-level access is resolved by OrgRoleResolver, not the Permission table.
+enum ResourceType {
+  FILE
+  FOLDER
+  ORGANIZATION
+}
+
+/// Ordered OWNER > ADMIN > EDITOR > VIEWER > GUEST — see PermissionResolver.ROLE_RANK for the
+/// numeric ranking used to answer "does role X meet minimum role Y."
+enum PermissionRole {
+  OWNER
+  ADMIN
+  EDITOR
+  VIEWER
+  GUEST
+}
+
+/// An explicit grant of `role` to `subject` on one resource. The resource's owner never needs a
+/// row here — PermissionResolver treats owner as an implicit OWNER grant, checked before this
+/// table is even queried. A grant directly on a resource always wins over an inherited grant from
+/// an ancestor folder (see docs/permissions.md for the full inheritance algorithm).
+model Permission {
+  id           String         @id @default(cuid())
+  subjectId    String
+  resourceType ResourceType
+  resourceId   String
+  role         PermissionRole
+  grantedBy    String
+  createdAt    DateTime       @default(now())
+
+  subject User @relation("PermissionSubject", fields: [subjectId], references: [id], onDelete: Cascade)
+  granter User @relation("PermissionGranter", fields: [grantedBy], references: [id], onDelete: Cascade)
+
+  @@unique([subjectId, resourceType, resourceId])
+  @@index([resourceType, resourceId])
+}
+
+/// PRIVATE behaves like today's owner-only default; ORG has no meaning yet (Organizations don't
+/// exist until Milestone 10) and is treated identically to PRIVATE until then — the enum value
+/// exists now purely so a future migration doesn't need to touch every existing SharedLink row.
+enum LinkVisibility {
+  PRIVATE
+  ORG
+  PUBLIC
+}
+
+/// Token-based access independent of the Permission table entirely — anyone with the token (and
+/// the password, if set) gets exactly the four capability flags below, regardless of whether they
+/// have an account or any explicit Permission grant. `GET /shared-links/:token` is a `@Public()`
+/// route for this reason.
+model SharedLink {
+  id            String         @id @default(cuid())
+  resourceType  ResourceType
+  resourceId    String
+  token         String         @unique
+  ownerId       String
+  passwordHash  String?
+  expiresAt     DateTime?
+  maxDownloads  Int?
+  downloadCount Int            @default(0)
+  canView       Boolean        @default(true)
+  canDownload   Boolean        @default(true)
+  canComment    Boolean        @default(false)
+  canEdit       Boolean        @default(false)
+  visibility    LinkVisibility @default(PRIVATE)
+  createdAt     DateTime       @default(now())
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([resourceType, resourceId])
+}
+
+/// A top-level scope above the personal Drive (see docs/organizations.md). The owner is always
+/// an implicit OWNER-ranked member — no OrganizationMember row needed for them, mirroring how
+/// Folder/File ownership never needs a Permission row either (see OrgRoleResolver).
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner      User                 @relation("OrganizationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members    OrganizationMember[]
+  workspaces Workspace[]
+  folders    Folder[]
+
+  @@index([ownerId])
+}
+
+/// Belongs to exactly one Organization. Every workspace gets its own root Folder (parentId null,
+/// workspaceId set), created eagerly by CreateWorkspaceUseCase — the org-scoped equivalent of a
+/// personal "My Drive" root, which is instead created lazily on first request (see
+/// GetOrCreateRootFolderUseCase). All further navigation (children, breadcrumb, file listing,
+/// upload) reuses the exact same Folder/File endpoints personal Drive uses; PermissionResolver's
+/// org-role fallback is what makes that safe for org-scoped resources.
+model Workspace {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  folders      Folder[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/// role reuses PermissionRole (OWNER/ADMIN/EDITOR/VIEWER/GUEST) rather than a separate
+/// organization-role enum — org roles and resource roles are the same rank vocabulary throughout
+/// this app (see roleMeetsMinimum), and PermissionResolver's org-role fallback folds an org
+/// member's role directly into the same comparison it already does for explicit resource grants.
+model OrganizationMember {
+  id             String         @id @default(cuid())
+  organizationId String
+  userId         String
+  role           PermissionRole
+  createdAt      DateTime       @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+/// A pending grant addressed by email rather than by an existing User id — accepting one creates
+/// the Permission row (and, for an email with no matching User yet, is where "new user signs up,
+/// then lands with the role already applied" resolves: acceptance looks up the now-existing User
+/// by email at accept time, not invite time).
+model Invitation {
+  id           String            @id @default(cuid())
+  email        String
+  resourceType ResourceType
+  resourceId   String
+  role         PermissionRole
+  token        String            @unique
+  invitedBy    String
+  status       InvitationStatus  @default(PENDING)
+  expiresAt    DateTime
+  createdAt    DateTime          @default(now())
+
+  inviter User @relation(fields: [invitedBy], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([resourceType, resourceId])
+}
+
+model Comment {
+  id           String       @id @default(cuid())
+  resourceType ResourceType
+  resourceId   String
+  authorId     String
+  body         String
+  resolved     Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([resourceType, resourceId])
+}
+
+enum NotificationType {
+  SHARE
+  PERMISSION_CHANGE
+  COMMENT
+  /// Not translated from an ActivityEvent like the other three — QuotaService emits a dedicated
+  /// QUOTA_THRESHOLD_EVENT directly when usage crosses 80/95/100%, since there's no user "action"
+  /// to translate (see docs/quota.md).
+  QUOTA_WARNING
+}
+
+/// A deliberately narrow subset of ActivityAction — only the actions that name a specific,
+/// addressable recipient (someone invited, someone whose access changed, someone's resource
+/// commented on) become a Notification. `payload` carries whatever the specific type needs
+/// (resourceType/resourceId/role/etc.) rather than a fixed column per notification type, mirroring
+/// Activity.metadata's shape for the same reason: one generic listener translates ActivityEvents
+/// into rows, not one code path per notification kind.
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String
+  type        NotificationType
+  payload     Json
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, createdAt])
+  @@index([recipientId, readAt])
+}
+
+enum AuditEventType {
+  LOGIN
+  LOGOUT
+  SESSION_REVOKED
+  AUTH_TOKEN_REJECTED
+  PERMISSION_ESCALATION_ATTEMPT
+  PERMISSION_GRANTED
+  PERMISSION_REVOKED
+  VIRUS_DETECTED
+  /// Milestone 13 — an admin action, always written with the admin as actorId and the affected
+  /// user as targetId/targetType "USER".
+  USER_SUSPENDED
+  USER_UNSUSPENDED
+  ADMIN_ROLE_GRANTED
+  ADMIN_ROLE_REVOKED
+  /// An admin overrode a user's default storage quota (see StorageQuota.limitBytes).
+  USER_QUOTA_UPDATED
+  /// Admin-only organization actions — targetId/targetType "ORGANIZATION".
+  ORGANIZATION_QUOTA_UPDATED
+  ORGANIZATION_OWNER_TRANSFERRED
+  ORGANIZATION_DELETED
+  /// An admin changed or removed a member's role directly, bypassing OrgRoleResolver (the admin
+  /// need not be a member of the organization themselves) — see AdminChangeMemberRoleUseCase /
+  /// AdminRemoveOrganizationMemberUseCase.
+  ORGANIZATION_MEMBER_ROLE_CHANGED
+  ORGANIZATION_MEMBER_REMOVED
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+}
+
+/// Distinct from Activity: security-focused rather than user-facing, and captures failures
+/// (a rejected token, a blocked escalation attempt) that Activity never sees since it only
+/// records things that actually happened. `actorId` is nullable — a rejected auth token may not
+/// resolve to any known local user — and survives actor deletion (SetNull, not Cascade, unlike
+/// every other actor-owned table in this schema) since a security trail shouldn't disappear
+/// along with the account it's about. Written exclusively by AuditModule's listeners, mirroring
+/// how ActivityModule owns the Activity table — see docs/security.md.
+model AuditLog {
+  id         String         @id @default(cuid())
+  actorId    String?
+  eventType  AuditEventType
+  outcome    AuditOutcome
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime       @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([eventType, createdAt])
+  /// Neither index above helps a pure age-based scan (actorId is nullable, eventType is an
+  /// unrelated filter) — the retention purge job needs its own on createdAt alone.
+  @@index([createdAt])
+}

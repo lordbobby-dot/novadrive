@@ -1,0 +1,53 @@
+name: novadrive
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: novadrive
+      POSTGRES_PASSWORD: novadrive
+      POSTGRES_DB: novadrive
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./.docker-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novadrive -d novadrive"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./.docker-data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Virus-scanning sidecar for the upload pipeline (see docs/security.md). clamd listens on 3310;
+  # apps/api talks to it over plain TCP via the `clamscan` npm client, no local binary needed.
+  # First boot downloads the virus database (a few hundred MB) before clamd starts accepting
+  # connections, hence the long start_period below.
+  clamav:
+    image: clamav/clamav:stable
+    # No arm64 manifest published for this image as of this writing — force amd64 under
+    # Docker Desktop's emulation (Rosetta/QEMU) rather than failing to pull on Apple Silicon.
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "3310:3310"
+    volumes:
+      - ./.docker-data/clamav:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m

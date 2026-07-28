@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "pnpm",
+  "plugins": ["@stryker-mutator/jest-runner"],
+  "testRunner": "jest",
+  "jest": {
+    "projectType": "custom",
+    "configFile": "jest.stryker.config.js"
+  },
+  "coverageAnalysis": "perTest",
+  "mutate": [
+    "src/modules/sharing/domain/permission-resolver.service.ts",
+    "src/modules/sharing/domain/permission.entity.ts",
+    "src/modules/organizations/domain/org-role-resolver.service.ts"
+  ],
+  "reporters": ["html", "clear-text", "progress"],
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true,
+  "timeoutMS": 30000,
+  "concurrency": 4
+}

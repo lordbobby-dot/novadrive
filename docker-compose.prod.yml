@@ -1,0 +1,207 @@
+name: novadrive-prod
+
+# Reference production stack for a single host — see docs/deployment.md. Postgres/Redis are run
+# here as containers for a self-contained reference deploy; the roadmap's own guidance is to
+# treat them as *managed-service recommendations* in a real production environment (RDS/
+# ElastiCache/Upstash/etc.), not as containers you operate yourself — this file is what you'd
+# replace those two services with a `DATABASE_URL`/`REDIS_HOST` pointing at the managed service,
+# unchanged everywhere else. S3 is always real AWS, never mocked, in every environment this
+# project has ever run in.
+#
+# Usage:
+#   cp .env.prod.example .env.prod   # fill in real values — see docs/deployment.md
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-novadrive}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-novadrive}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-novadrive} -d ${POSTGRES_DB:-novadrive}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav:stable
+    platform: linux/amd64
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+
+  # One-off job: applies committed migrations before `api` starts. Exits after running — `api`
+  # waits for it to *complete successfully*, not just start, via the condition below.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-novadrive}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-novadrive}?schema=public
+    working_dir: /app/apps/api
+    entrypoint: ["node_modules/.bin/prisma", "migrate", "deploy"]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${API_PORT:-4000}:4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      CORS_ORIGIN: ${WEB_ORIGIN:?WEB_ORIGIN is required, e.g. https://app.example.com}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-novadrive}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-novadrive}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?CLERK_SECRET_KEY is required}
+      CLERK_WEBHOOK_SIGNING_SECRET: ${CLERK_WEBHOOK_SIGNING_SECRET:?CLERK_WEBHOOK_SIGNING_SECRET is required}
+      ADMIN_BOOTSTRAP_EMAILS: ${ADMIN_BOOTSTRAP_EMAILS:-}
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:?AWS_S3_BUCKET is required}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-console}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: novadrive-api
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:4000/health',(r)=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Runs the exact same Nest module graph as `api` (see apps/api/src/main-worker.ts) — the BullMQ
+  # processors (checksum verification, abandoned-upload cleanup, trash cleanup, audit log purge)
+  # started here are the same classes `api` also hosts; BullMQ distributes jobs across whichever
+  # workers are consuming a given queue via Redis, so running both `api` and `worker` doesn't
+  # double-process anything. This service exists so job-processing capacity can be scaled
+  # (`docker compose ... up -d --scale worker=3`) independently of HTTP-request capacity — see
+  # docs/deployment.md's "Scaling notes" section.
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["node", "apps/api/dist/src/main-worker"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-novadrive}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-novadrive}?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: 3310
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?CLERK_SECRET_KEY is required}
+      CLERK_WEBHOOK_SIGNING_SECRET: ${CLERK_WEBHOOK_SIGNING_SECRET:?CLERK_WEBHOOK_SIGNING_SECRET is required}
+      ADMIN_BOOTSTRAP_EMAILS: ${ADMIN_BOOTSTRAP_EMAILS:-}
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:?AWS_S3_BUCKET is required}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-console}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_SERVICE_NAME: novadrive-worker
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    healthcheck:
+      # No HTTP server to probe here (see apps/api/src/main-worker.ts) — process liveness is the
+      # signal instead: `pgrep` finding the entrypoint script confirms the Node process hasn't
+      # crashed, which is what `restart: unless-stopped` above would otherwise only catch on a
+      # full process exit anyway. Deeper "is it actually still consuming jobs" health isn't
+      # exposed by BullMQ workers without standing up a probe endpoint, which would reintroduce
+      # the HTTP surface this service exists to avoid.
+      test: ["CMD-SHELL", "pgrep -f main-worker || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${API_ORIGIN:?API_ORIGIN is required, e.g. https://api.example.com}
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is required}
+        NEXT_PUBLIC_CLERK_SIGN_IN_URL: /sign-in
+        NEXT_PUBLIC_CLERK_SIGN_UP_URL: /sign-up
+        NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: /
+        NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: /
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Server Components (e.g. app/drive/page.tsx, app/dashboard/page.tsx) fetch the API from
+      # inside this container, not the browser — NEXT_PUBLIC_API_URL is baked into the client
+      # bundle at build time and points at the host-published API_ORIGIN, which isn't reachable
+      # from inside this container's network. This runtime-only var overrides it for server-side
+      # fetches, using the api service's Compose DNS name instead.
+      API_INTERNAL_URL: http://api:4000
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?CLERK_SECRET_KEY is required}
+      SENTRY_ORG: ${SENTRY_ORG:-}
+      SENTRY_PROJECT: ${SENTRY_PROJECT:-}
+      SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
+
+volumes:
+  postgres-data:
+  redis-data:
+  clamav-data:

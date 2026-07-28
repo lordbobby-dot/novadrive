@@ -1,0 +1,55 @@
+version: 2
+updates:
+  # pnpm workspace — Dependabot's npm ecosystem understands pnpm-workspace.yaml natively, so a
+  # single root entry covers every package under apps/*, packages/*, and shared/ rather than
+  # needing one entry per workspace package.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Patch/minor bumps are low-risk and high-volume — bundling them into one PR per run keeps
+      # the noise down without hiding anything that needs real review (major bumps still get their
+      # own individual PR, ungrouped).
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
+
+  # Docker ecosystem entries are scoped one-Dockerfile-per-directory — see apps/api/Dockerfile and
+  # apps/web/Dockerfile (each pins `node:20-slim` in multiple stages; Dependabot bumps every FROM
+  # line in a given Dockerfile together).
+  - package-ecosystem: "docker"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker)"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(docker)"

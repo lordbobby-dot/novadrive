@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Turbo
+.turbo/
+
+# Env
+.env
+.env.local
+.env.*.local
+.env.prod
+!.env.example
+!.env.prod.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+playwright-report/
+test-results/
+apps/api/reports/
+apps/api/.stryker-tmp/
+
+# Prisma
+apps/api/generated/
+
+# Generated OpenAPI spec (dumped by apps/api/scripts/dump-openapi.ts for the contract test)
+apps/api/openapi.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+
+# Docker volumes (local dev data)
+.docker-data/
+
+# Database backups (scripts/backup-db.sh output) — contain real user data, never committed
+backups/

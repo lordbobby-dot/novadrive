@@ -1,0 +1,39 @@
+# Keeps the Docker build context (what `COPY . .` in the pruner stage sends to the daemon) small
+# and excludes things that would be stale/wrong to bake into an image anyway. Mirrors .gitignore
+# plus a few Docker-specific additions.
+
+node_modules
+.pnpm-store
+**/node_modules
+
+dist
+.next
+out
+build
+*.tsbuildinfo
+
+.turbo
+
+.env
+.env.local
+.env.*.local
+
+*.log
+
+coverage
+playwright-report
+test-results
+apps/api/reports
+apps/api/.stryker-tmp
+
+apps/api/generated
+apps/api/openapi.json
+
+.git
+.github
+
+.DS_Store
+.idea
+.vscode
+
+.docker-data
