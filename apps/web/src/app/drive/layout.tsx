@@ -1,9 +1,14 @@
+import type { Metadata } from "next";
 import { UserButton } from "@clerk/nextjs";
 import { Sidebar } from "@/components/drive/sidebar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UploadProgressPanel } from "@/components/drive/upload-progress-panel";
 import { NotificationBell } from "@/components/drive/notification-bell";
 import { SearchBar } from "@/components/search/search-bar";
+
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+};
 
 export default function DriveLayout({ children }: { children: React.ReactNode }) {
   return (

@@ -1,4 +1,9 @@
+import type { Metadata } from "next";
 import { ShareLinkView } from "@/components/share/share-link-view";
+
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+};
 
 export default async function ShareLinkPage({
   params,

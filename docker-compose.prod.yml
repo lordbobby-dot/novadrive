@@ -181,6 +181,12 @@ services:
         NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: /
         NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: /
         NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        # Canonical public origin for metadata/sitemap/robots/OG images — see docs/seo.md.
+        # Falls back to the real production origin in src/lib/seo.ts if left unset.
+        NEXT_PUBLIC_APP_URL: ${WEB_ORIGIN:-}
+        # Google Search Console's HTML-tag verification code — leave unset until you've started
+        # verification; the meta tag is only rendered when this is present. See docs/seo.md.
+        NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION: ${NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION:-}
     restart: unless-stopped
     depends_on:
       api:
